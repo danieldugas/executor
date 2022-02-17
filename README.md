@@ -18,3 +18,5 @@
 ✓ Define **command dependency** with bash comments  
 ✓ **Restore progress** from previous execution  
 ✓ Re-run all or **only failed** commands in script  
+
+[Install](docs/install.md)

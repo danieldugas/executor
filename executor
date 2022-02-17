@@ -11,7 +11,7 @@ from pygments import highlight
 from pygments.lexers import BashLexer
 from pygments.formatters import TerminalFormatter
 
-DEBUG = True
+DEBUG = False
 
 class St(Enum):
     UNTREATED = 0

@@ -193,6 +193,16 @@ def assign_dependencies(state):
         else:
             continue
 
+def detect_incompatible_commands(state):
+    for line in state:
+        if line.command is None:
+            continue
+        if line.command.strip(" ").startswith("set -e"):
+            raise ValueError("set -e command is not supported")
+        if line.command.strip(" ").startswith("set -x"):
+            raise ValueError("set -x command is not supported")
+
+
 def execute_line(line, ishell):
     if line.command is None:
         return 0, ""
@@ -221,6 +231,7 @@ def initialize_state(path):
     state = [Line(idx+1, line, origline)
              for idx, (origline, line) in enumerate(zip(original_lines, corrected_lines))]
     assign_dependencies(state)
+    detect_incompatible_commands(state)
     return state
 
 def make_dir_if_not_exists(dir_):

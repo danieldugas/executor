@@ -1,0 +1,247 @@
+#!/usr/bin/env python
+import os
+import pickle
+import time
+from datetime import datetime
+from pyniel.python_tools.path_tools import make_dir_if_not_exists
+from strictfire import StrictFire
+from enum import Enum
+from pygments import highlight
+from pygments.lexers import BashLexer
+from pygments.formatters import TerminalFormatter
+
+class St(Enum):
+    UNTREATED = 0
+    SKIPPED = 1
+    EXECUTING = 2
+    SUCCEEDED = 3
+    FAILED = 4
+
+def as_symbol(st):
+    if st == St.UNTREATED:
+        return "  "
+    elif st == St.SKIPPED:
+        return "- "
+    elif st == St.EXECUTING:
+        return "->"
+    elif st == St.SUCCEEDED:
+        return "✓ "
+    elif st == St.FAILED:
+        return "✗ "
+    else:
+        raise ValueError
+
+class Line(object):
+    idx = None
+    command = None
+    origtext = None
+    status = St.UNTREATED
+    dependencies = None
+    retcode = None
+    output = None
+    info = None
+
+    def __init__(self, idx, command, origtext):
+        self.idx = idx
+        self.command = command
+        self.origtext = origtext
+        self.dependencies = []
+
+    def __repr__(self):
+        return '<Line {} {} {} {} {} {} {}>'.format(
+            self.idx, self.status, self.dependencies, self.command, self.retcode, self.output, self.info)
+
+    def human(self):
+        hl_text = highlight(self.origtext, BashLexer(), TerminalFormatter())
+        symbol = as_symbol(self.status)
+        idx = self.idx
+        if self.command is None:
+            idx = "   "
+            symbol = " "
+        return '{} {:>3} {}'.format(symbol, idx, hl_text)
+
+def pretty_print(state):
+    print("")
+    human_lines = "\n".join([line.origtext for line in state])
+    hl_human_lines = highlight(human_lines, BashLexer(), TerminalFormatter())
+    for hl_linetext, line in zip(hl_human_lines.split("\n"), state):
+        symbol = as_symbol(line.status)
+        idx = line.idx
+        if line.command is None:
+            idx = "   "
+            symbol = "  "
+        print('{} {:>3} {}'.format(symbol, idx, hl_linetext))
+
+def all_succeeded(state):
+    for line in state:
+        if line.status != St.SUCCEEDED:
+            return False
+    return True
+
+def split_lines(filetext):
+    lines = filetext.split('\n')
+    # we want to keep the original numbering so we cant just ignore '\\\n'
+    for i in range(len(lines))[::-1]:
+        line = lines[i]
+        if line.endswith('\\'):
+            nextline = ""
+            if i + 1 < len(lines):
+                nextline = lines[i + 1] + ""
+                lines[i + 1] = None
+            line = line[:-2] + nextline
+            lines[i] = line
+    return filetext.split('\n'), lines
+
+def is_comment(linetext):
+    if linetext is None:
+        return False
+    return linetext.strip(" ").startswith('#')
+
+def assign_dependencies(state):
+    for line in state:
+        if not is_comment(line.command):
+            continue
+        line.info = "Comment"
+        idx = line.idx
+        args = line.command.strip(" #").split(" ")
+        if args and args.pop(0) == "executor":
+            if args:
+                command = args.pop(0)
+            else:
+                raise ValueError("executor command not specified: {}".format(line))
+                continue
+            if command == "set-dependent":
+                # all following lines depend on the previous
+                for i in range(idx+1, len(state)):
+                    state[i].dependencies.append(i-1)
+            elif command == "set-independent":
+                # all following lines lose their dependency
+                for i in range(idx+1, len(state)):
+                    state[i].dependencies = []
+            elif command == "if":
+                if args:
+                    condition = int(args.pop(0))
+                else:
+                    raise ValueError("if condition not specified: {}".format(line))
+                    continue
+                state[idx+1].dependencies.append(condition)
+        else:
+            continue
+
+def execute_line(line):
+    if line.command is None:
+        return 0, ""
+    return 0, ""
+
+def initialize_state(path):
+    original_script = open(path, 'r').read()
+    original_lines, corrected_lines = split_lines(original_script)
+    state = [Line(idx, line, origline)
+             for idx, (origline, line) in enumerate(zip(original_lines, corrected_lines))]
+    assign_dependencies(state)
+    return state
+
+def write_state(path, state):
+    for line in state:
+        if line.status == St.EXECUTING:
+            line.status = St.UNTREATED
+    wpath = path + ".executor"
+    make_dir_if_not_exists(os.path.dirname(wpath))
+    if os.path.exists(wpath):
+        print("Overwriting {}".format(wpath))
+    pickle.dump(state, open(wpath, 'wb'))
+    print("Wrote {}".format(wpath))
+
+def load_previous_if_exists(path, force_rerun=False):
+    new_state = initialize_state(path)
+    prev_path = path + ".executor"
+    if not os.path.exists(prev_path):
+        return new_state
+    prev_state = pickle.load(open(prev_path, 'rb'))
+    if states_have_same_original_files(new_state, prev_state):
+        print("Previous execution found for script (script is unchanged).")
+        if force_rerun:
+            print("Forcing rerun.")
+            return new_state
+        if not all_succeeded(prev_state):
+            print("c Continue")
+        print("f Re-run failed")
+        print("a Re-run all")
+        print("d Display state")
+        print("q Abort")
+        choice = input(">> ")
+        if choice == 'c' and not all_succeeded(prev_state):
+            print("Resuming from previous execution.")
+            return prev_state
+        elif choice == 'f':
+            for line in prev_state:
+                if line.status in [St.FAILED, St.SKIPPED]:
+                    line.status = St.UNTREATED
+            print("Re-running failed then resuming")
+            return prev_state
+        elif choice == 'q':
+            print("Aborting.")
+        elif choice == 'a':
+            print("Re-running all.")
+            return new_state
+        elif choice == 'd':
+            pretty_print(prev_state)
+            return load_previous_if_exists(path)
+        else:
+            print("Unknown choice {}".format(choice))
+        return None
+    else:
+        print("Previous state found for script, but script has changed.")
+        if force_rerun:
+            print("Forcing rerun.")
+            return new_state
+        yn = input("Execute new script? [y/n]")
+        if yn.lower() in ['y', 'yes']:
+            return new_state
+        else:
+            exit
+
+def states_have_same_original_files(state1, state2):
+    if len(state1) != len(state2):
+        return False
+    for line1, line2 in zip(state1, state2):
+        if line1.origtext != line2.origtext:
+            return False
+    return True
+
+def main(path):
+    state = load_previous_if_exists(path)
+    if state is None:
+        return
+    # print state
+    for line in state:
+        print(line)
+    print("")
+    # execute_line(state)
+    start_t = datetime.now()
+    for line in state:
+        if line.status != St.UNTREATED:
+            continue
+        skip = False
+        for dep in line.dependencies:
+            if state[dep].status != St.SUCCEEDED:
+                skip = True
+        if skip:
+            line.status = St.SKIPPED
+            continue
+        line.status = St.EXECUTING
+        print("EXECUTING ({})".format(datetime.now() - start_t))
+        print("---------")
+        pretty_print(state)
+        retcode, output = execute_line(line)
+        if retcode == 0:
+            line.status = St.SUCCEEDED
+        else:
+            line.status = St.FAILED
+    globals().update(locals()) # TODO: remove
+
+
+if __name__ == '__main__':
+    from navrep3d.auto_debug import enable_auto_debug # TODO: remove
+    enable_auto_debug()
+    StrictFire(main)

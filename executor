@@ -125,6 +125,17 @@ def up_to(state, idx):
         lines.append(line)
     return lines
 
+def after(state, idx):
+    lines = []
+    passed = False
+    for line in state:
+        if line.idx == idx:
+            passed = True
+            continue
+        if passed:
+            lines.append(line)
+    return lines
+
 def assign_dependencies(state):
     for line in state:
         if not is_comment(line.command):
@@ -143,13 +154,13 @@ def assign_dependencies(state):
                 print("Warning: executor directive specified as last line. Ignoring.")
                 break
             if directive == "set-dependent":
-                # all following lines depend on the previous
-                for i in range(idx+1, len(state)):
-                    state[i].dependencies.append(i-1)
+                # all following lines depend on their predecessor
+                for lnpredecessor, ln in zip(after(state, idx), after(state, idx+1)):
+                    ln.dependencies.append(lnpredecessor.idx)
             elif directive == "set-independent":
                 # all following lines lose their dependency
-                for i in range(idx+1, len(state)):
-                    state[i].dependencies = []
+                for ln in after(state, idx):
+                    ln.dependencies = []
             elif directive == "always":
                 nextline.always = "always"
             elif directive == "always-try":
@@ -227,6 +238,7 @@ def write_state(path, state):
 
     # write log
     log = "\n".join([line.output for line in state if line.output is not None])
+    log = log + "\n" + datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     lpath = path + ".executor.log"
     make_dir_if_not_exists(os.path.dirname(lpath))
     if os.path.exists(lpath):
@@ -291,14 +303,15 @@ def states_have_same_original_files(state1, state2):
             return False
     return True
 
-def main(path):
-    state = load_previous_if_exists(path)
+def main(path, force_rerun=False, debug=False):
+    path = os.path.abspath(path)
+    state = load_previous_if_exists(path, force_rerun=force_rerun)
     if state is None:
         return
-    # print state
-    for line in state:
-        print(line)
-    print("")
+    if debug:
+        for line in state:
+            print(line)
+        input("Press enter to continue")
     # execute(state)
     ishell = pexpect.spawn("/bin/bash")
     ishell.expect(r'\$')
@@ -310,7 +323,7 @@ def main(path):
                 continue
             skip = False
             for dep in line.dependencies:
-                if state[dep].status != St.SUCCEEDED:
+                if find_line_with_idx(dep, state).status != St.SUCCEEDED:
                     skip = True
             if skip:
                 line.status = St.SKIPPED
@@ -329,6 +342,12 @@ def main(path):
             if line.always == "always":
                 print("Always-required command failed. Aborting.")
                 break
+    print("EXECUTING ({})".format(datetime.now() - start_t))
+    print("---------")
+    pretty_print(state)
+    print("")
+    print("DONE.")
+    print("")
     write_state(path, state)
     if DEBUG:
         globals().update(locals())

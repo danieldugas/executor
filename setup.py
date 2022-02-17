@@ -4,7 +4,7 @@ setup(
     name="exectr",
     description="The shell-script executor you didn't know you needed",
     author='Daniel Dugas',
-    version='0.0.1',
+    version='0.0.2',
     packages=[],
     scripts=['scripts/executor'],
     python_requires='>=3.6, <3.7',

@@ -1,5 +1,8 @@
 ls
 
+echo $1
+echo $2
+
 # executor always
 cd /tmp
 ls

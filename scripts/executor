@@ -199,7 +199,7 @@ def execute_line(line, ishell):
     if is_comment(line.command):
         return 0, ""
     ishell.sendline(line.command)
-    ishell.expect(r'\$ ')
+    ishell.expect(r'\$ ', timeout=None)
     out = ishell.before.decode()
     # get retcode
     ishell.sendline("echo $?")
@@ -230,16 +230,18 @@ def make_dir_if_not_exists(dir_):
         if not os.path.isdir(dir_):
             raise
 
-def write_state(path, state):
+def write_state(path, state, silent=False):
     for line in state:
         if line.status == St.EXECUTING:
             line.status = St.UNTREATED
     wpath = path + ".executor"
     make_dir_if_not_exists(os.path.dirname(wpath))
     if os.path.exists(wpath):
-        print("Overwriting {}".format(wpath))
+        if not silent:
+            print("Overwriting {}".format(wpath))
     else:
-        print("Writing {}".format(wpath))
+        if not silent:
+            print("Writing {}".format(wpath))
     pickle.dump(state, open(wpath, 'wb'))
 
     # write log
@@ -248,9 +250,11 @@ def write_state(path, state):
     lpath = path + ".executor.log"
     make_dir_if_not_exists(os.path.dirname(lpath))
     if os.path.exists(lpath):
-        print("Overwriting {}".format(lpath))
+        if not silent:
+            print("Overwriting {}".format(lpath))
     else:
-        print("Writing {}".format(lpath))
+        if not silent:
+            print("Writing {}".format(lpath))
     open(lpath, 'w').write(log)
 
 def load_previous_if_exists(path, force_rerun=False):
@@ -310,8 +314,9 @@ def states_have_same_original_files(state1, state2):
             return False
     return True
 
-def main(path, force_rerun=False, debug=False):
+def main(path, args="", force_rerun=False, debug=False):
     path = os.path.abspath(path)
+    print("Going to EXECUTE script {} {}".format(path, args))
     state = load_previous_if_exists(path, force_rerun=force_rerun)
     if state is None:
         return
@@ -321,7 +326,11 @@ def main(path, force_rerun=False, debug=False):
         input("Press enter to continue")
     # execute(state)
     ishell = pexpect.spawn("/bin/bash")
+    ishell.logfile = open('/tmp/executor_running_log.txt', 'wb')
     ishell.expect(r'\$')
+    if args != "":
+        ishell.sendline("set {}".format(args))
+        ishell.expect(r'\$')
     start_t = datetime.now()
     for line in state:
         if line.always == "no":
@@ -335,6 +344,7 @@ def main(path, force_rerun=False, debug=False):
             if skip:
                 line.status = St.SKIPPED
                 continue
+        write_state(path, state, silent=True)
         line.status = St.EXECUTING
         print("EXECUTING ({})".format(datetime.now() - start_t))
         print("---------")
@@ -358,6 +368,8 @@ def main(path, force_rerun=False, debug=False):
     write_state(path, state)
     if DEBUG:
         globals().update(locals())
+    ishell.logfile.close()
+    ishell.close()
 
 
 if __name__ == '__main__':

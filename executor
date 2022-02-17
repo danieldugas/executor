@@ -1,8 +1,7 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 import os
 import pickle
 import pexpect
-import time
 from datetime import datetime
 from pyniel.python_tools.path_tools import make_dir_if_not_exists
 from strictfire import StrictFire
@@ -170,7 +169,7 @@ def assign_dependencies(state):
                     tag = args.pop(0)
                     try:
                         condition = int(tag)
-                    except:
+                    except ValueError:
                         target = find_line_with_tag(tag, state, before=idx)
                         if target is None:
                             raise ValueError("if directive: tag not found: {}".format(line.command))
@@ -233,8 +232,9 @@ def write_state(path, state):
     make_dir_if_not_exists(os.path.dirname(wpath))
     if os.path.exists(wpath):
         print("Overwriting {}".format(wpath))
+    else:
+        print("Writing {}".format(wpath))
     pickle.dump(state, open(wpath, 'wb'))
-    print("Wrote {}".format(wpath))
 
     # write log
     log = "\n".join([line.output for line in state if line.output is not None])
@@ -243,8 +243,9 @@ def write_state(path, state):
     make_dir_if_not_exists(os.path.dirname(lpath))
     if os.path.exists(lpath):
         print("Overwriting {}".format(lpath))
+    else:
+        print("Writing {}".format(lpath))
     open(lpath, 'w').write(log)
-    print("Wrote {}".format(lpath))
 
 def load_previous_if_exists(path, force_rerun=False):
     new_state = initialize_state(path)
@@ -355,6 +356,14 @@ def main(path, force_rerun=False, debug=False):
 
 if __name__ == '__main__':
     if DEBUG:
-        from navrep3d.auto_debug import enable_auto_debug
+        from IPython import get_ipython
+
+        def enable_auto_debug():
+            ipython = get_ipython()
+            if ipython is None:
+                print("WARNING: Auto debugging can not be enabled, please run this script with ipython")
+                return
+            else:
+                ipython.magic("pdb 1")
         enable_auto_debug()
     StrictFire(main)

@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import os
 import pickle
+import pexpect
 import time
 from datetime import datetime
 from pyniel.python_tools.path_tools import make_dir_if_not_exists
@@ -9,6 +10,8 @@ from enum import Enum
 from pygments import highlight
 from pygments.lexers import BashLexer
 from pygments.formatters import TerminalFormatter
+
+DEBUG = True
 
 class St(Enum):
     UNTREATED = 0
@@ -39,7 +42,9 @@ class Line(object):
     dependencies = None
     retcode = None
     output = None
-    info = None
+    dbginfo = None
+    tag = None
+    always = "no"
 
     def __init__(self, idx, command, origtext):
         self.idx = idx
@@ -48,8 +53,9 @@ class Line(object):
         self.dependencies = []
 
     def __repr__(self):
-        return '<Line {} {} {} {} {} {} {}>'.format(
-            self.idx, self.status, self.dependencies, self.command, self.retcode, self.output, self.info)
+        return '<Line {} {} {} {} {} {} {} {} {}>'.format(
+            self.idx, self.status, self.tag, self.dependencies, self.always,
+            self.command, self.retcode, self.output, self.dbginfo)
 
     def human(self):
         hl_text = highlight(self.origtext, BashLexer(), TerminalFormatter())
@@ -97,46 +103,113 @@ def is_comment(linetext):
         return False
     return linetext.strip(" ").startswith('#')
 
+def find_line_with_tag(tag, state, before=None):
+    for line in state:
+        if before is not None and line.idx == before:
+            break
+        if line.tag == tag:
+            return line
+    return None
+
+def find_line_with_idx(idx, state):
+    for line in state:
+        if line.idx == idx:
+            return line
+    return None
+
+def up_to(state, idx):
+    lines = []
+    for line in state:
+        if line.idx == idx:
+            break
+        lines.append(line)
+    return lines
+
 def assign_dependencies(state):
     for line in state:
         if not is_comment(line.command):
             continue
-        line.info = "Comment"
+        line.dbginfo = "Comment"
         idx = line.idx
+        nextline = find_line_with_idx(idx + 1, state)
         args = line.command.strip(" #").split(" ")
         if args and args.pop(0) == "executor":
             if args:
-                command = args.pop(0)
+                directive = args.pop(0)
             else:
-                raise ValueError("executor command not specified: {}".format(line))
+                raise ValueError("executor directive not specified: {}".format(line.command))
                 continue
-            if command == "set-dependent":
+            if nextline is None:
+                print("Warning: executor directive specified as last line. Ignoring.")
+                break
+            if directive == "set-dependent":
                 # all following lines depend on the previous
                 for i in range(idx+1, len(state)):
                     state[i].dependencies.append(i-1)
-            elif command == "set-independent":
+            elif directive == "set-independent":
                 # all following lines lose their dependency
                 for i in range(idx+1, len(state)):
                     state[i].dependencies = []
-            elif command == "if":
+            elif directive == "always":
+                nextline.always = "always"
+            elif directive == "always-try":
+                nextline.always = "always-try"
+            elif directive == "if":
                 if args:
-                    condition = int(args.pop(0))
+                    tag = args.pop(0)
+                    try:
+                        condition = int(tag)
+                    except:
+                        target = find_line_with_tag(tag, state, before=idx)
+                        if target is None:
+                            raise ValueError("if directive: tag not found: {}".format(line.command))
+                        condition = target.idx
                 else:
-                    raise ValueError("if condition not specified: {}".format(line))
+                    raise ValueError("if condition not specified (# executor if NUMBER/TAG): {}".format(
+                        line.command))
                     continue
-                state[idx+1].dependencies.append(condition)
+                nextline.dependencies.append(condition)
+            elif directive == "tag":
+                if args:
+                    tag = args.pop(0)
+                    if find_line_with_tag(tag, state, before=idx) is not None:
+                        raise ValueError("tag directive: tag already exists: {}".format(line.command))
+                    nextline.tag = tag
+                else:
+                    raise ValueError("tag not specified (# executor tag TAG): {}".format(line.command))
+                    continue
+
+            else:
+                raise ValueError("unknown directive: {} in {}".format(directive, line.command))
         else:
             continue
 
-def execute_line(line):
+def execute_line(line, ishell):
     if line.command is None:
         return 0, ""
-    return 0, ""
+    if is_comment(line.command):
+        return 0, ""
+    ishell.sendline(line.command)
+    ishell.expect(r'\$ ')
+    out = ishell.before.decode()
+    # get retcode
+    ishell.sendline("echo $?")
+    ishell.expect(r'\$ ')
+    ret = ishell.before.decode()
+    ret = ret.split('\r\n')[1]
+    ret = int(ret)
+#     if DEBUG:
+#         pass
+#         print(out)
+#         time.sleep(1)
+#         if line.idx == 7:
+#             return 1, ""
+    return ret, out
 
 def initialize_state(path):
     original_script = open(path, 'r').read()
     original_lines, corrected_lines = split_lines(original_script)
-    state = [Line(idx, line, origline)
+    state = [Line(idx+1, line, origline)
              for idx, (origline, line) in enumerate(zip(original_lines, corrected_lines))]
     assign_dependencies(state)
     return state
@@ -151,6 +224,15 @@ def write_state(path, state):
         print("Overwriting {}".format(wpath))
     pickle.dump(state, open(wpath, 'wb'))
     print("Wrote {}".format(wpath))
+
+    # write log
+    log = "\n".join([line.output for line in state if line.output is not None])
+    lpath = path + ".executor.log"
+    make_dir_if_not_exists(os.path.dirname(lpath))
+    if os.path.exists(lpath):
+        print("Overwriting {}".format(lpath))
+    open(lpath, 'w').write(log)
+    print("Wrote {}".format(lpath))
 
 def load_previous_if_exists(path, force_rerun=False):
     new_state = initialize_state(path)
@@ -217,31 +299,43 @@ def main(path):
     for line in state:
         print(line)
     print("")
-    # execute_line(state)
+    # execute(state)
+    ishell = pexpect.spawn("/bin/bash")
+    ishell.expect(r'\$')
     start_t = datetime.now()
     for line in state:
-        if line.status != St.UNTREATED:
-            continue
-        skip = False
-        for dep in line.dependencies:
-            if state[dep].status != St.SUCCEEDED:
-                skip = True
-        if skip:
-            line.status = St.SKIPPED
-            continue
+        if line.always == "no":
+            # skip lines if required (dependencies, or already done)
+            if line.status != St.UNTREATED:
+                continue
+            skip = False
+            for dep in line.dependencies:
+                if state[dep].status != St.SUCCEEDED:
+                    skip = True
+            if skip:
+                line.status = St.SKIPPED
+                continue
         line.status = St.EXECUTING
         print("EXECUTING ({})".format(datetime.now() - start_t))
         print("---------")
         pretty_print(state)
-        retcode, output = execute_line(line)
+        retcode, output = execute_line(line, ishell)
+        line.retcode = retcode
+        line.output = output
         if retcode == 0:
             line.status = St.SUCCEEDED
         else:
             line.status = St.FAILED
-    globals().update(locals()) # TODO: remove
+            if line.always == "always":
+                print("Always-required command failed. Aborting.")
+                break
+    write_state(path, state)
+    if DEBUG:
+        globals().update(locals())
 
 
 if __name__ == '__main__':
-    from navrep3d.auto_debug import enable_auto_debug # TODO: remove
-    enable_auto_debug()
+    if DEBUG:
+        from navrep3d.auto_debug import enable_auto_debug
+        enable_auto_debug()
     StrictFire(main)

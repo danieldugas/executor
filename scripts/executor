@@ -3,7 +3,6 @@ import os
 import pickle
 import pexpect
 from datetime import datetime
-from pyniel.python_tools.path_tools import make_dir_if_not_exists
 from strictfire import StrictFire
 from enum import Enum
 from pygments import highlight
@@ -223,6 +222,13 @@ def initialize_state(path):
              for idx, (origline, line) in enumerate(zip(original_lines, corrected_lines))]
     assign_dependencies(state)
     return state
+
+def make_dir_if_not_exists(dir_):
+    try:  # noqa
+        os.makedirs(dir_)
+    except OSError:
+        if not os.path.isdir(dir_):
+            raise
 
 def write_state(path, state):
     for line in state:

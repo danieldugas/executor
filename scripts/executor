@@ -198,9 +198,11 @@ def detect_incompatible_commands(state):
         if line.command is None:
             continue
         if line.command.strip(" ").startswith("set -e"):
-            raise ValueError("set -e command is not supported")
+            raise ValueError("line {} in script: \n{} \n set -e command is not supported".format(
+                line.idx, line.command))
         if line.command.strip(" ").startswith("set -x"):
-            raise ValueError("set -x command is not supported")
+            raise ValueError("line {} in script: \n{} \n set -x command is not supported".format(
+                line.idx, line.command))
 
 
 def execute_line(line, ishell):

@@ -11,6 +11,32 @@ from pygments.formatters import TerminalFormatter
 
 DEBUG = False
 
+# distributed:
+# if distributed
+# place lock on state file when writing/loading?
+# load state before every exec
+# write running before every exec
+#    write only current line
+#    do this for skipped too!
+# write state after every exec
+#    reload, change only the current running to done
+#    usually we don't store running, here we should
+#    change running storage
+#    handle running in loaded state - if distrib 
+# (maybe) worker info in state? per line start time?
+# separate log per worker (in write state and pexpect logfile)
+# merged log at the end, prepend each line with worker id and time?
+#   X won't work, time is not per-output-line
+
+# print_version():
+# print executor logo
+# print version
+
+# if nothing to do
+# print version
+# print no file given to execute
+# print executor --help for usage
+
 class St(Enum):
     UNTREATED = 0
     SKIPPED = 1

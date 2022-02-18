@@ -18,6 +18,10 @@ DEBUG = False
 # write running before every exec
 #    write only current line
 #    do this for skipped too!
+# if dependency is running? wait then load again then recheck
+#   after wait, dependency may be succeeded
+#   but currebt line may also be succeeded / not
+#   if yes, continue
 # write state after every exec
 #    reload, change only the current running to done
 #    usually we don't store running, here we should

@@ -15,11 +15,17 @@ sleep 5
 # executor tag branch_origin
 sleep 5
 sleep 5
+# executor tag branch_2
 sleep 5
 
 # worker 2 can't process this because it waits on worker 1's task
 # executor set-independent
+# executor set-dependent
 # executor if branch_origin
+sleep 5
+
+# this one will have to wait and be picked up by worker 1
+# executor if branch_2
 sleep 5
 
 # worker 2 will pick this branch

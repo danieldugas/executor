@@ -3,3 +3,4 @@ example.sh.executor.log
 build/
 dist/
 *.egg-info/
+__pycache__/

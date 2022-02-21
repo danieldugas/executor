@@ -10,7 +10,7 @@ from pygments.formatters import TerminalFormatter
 
 DEBUG = False
 
-__version__ = '0.0.4'
+__version__ = '0.0.5'
 
 # distributed:
 # if distributed
@@ -36,7 +36,10 @@ __version__ = '0.0.4'
 # add reason for skip to state?
 
 def print_version():
-    print("""
+    import shutil
+    tsize = shutil.get_terminal_size((80, 20))
+    if tsize[0] > 69:
+        print("""
   ┌───────┐ ┌─┐  ┌─┐ ┌───────┐ ┌─────┐ ┌─┐ ┌─┐ ┌──────┐ ┌───┐ ┌─┬───┐
   └───────┘ │ │  │ │ └───────┘ ├─────┘ │ │ │ │ └──────┘ │   │ │ │   │
             └─┤  ├─┘           │       │ │ │ │          │   │ │ ├─┬─┘
@@ -45,8 +48,18 @@ def print_version():
             ┌─┤  ├─┐           │                 │  │   │   │ │ │ │ │
   ┌───────┐ │ │  │ │ ┌───────┐ ├─────┐ ┌─────┐   │  │   │   │ │ │ │ │
   └───────┘ └─┘  └─┘ └───────┘ └─────┘ └─────┘   └──┘   └───┘ └─┘ └─┘
-  """)
+      """)
+    elif tsize[0] > 24:
+        print("""
+ __    __ __   ___ _  _ 
+|_ \ /|_ /  | | | / \|_)
+|__/ \|__\__|_| | \_/| \\
+        """)
+    else:
+        print("EXECUTOR")
+        print("")
     print("Executor version {}".format(__version__))
+
 class St(Enum):
     UNTREATED = 0
     SKIPPED = 1
@@ -78,6 +91,9 @@ class Line(object):
     output = None
     dbginfo = None
     tag = None
+    executedby = None # or skippedby
+    starttime = None
+    endtime = None
     always = "no"
 
     def __init__(self, idx, command, origtext):
@@ -85,36 +101,50 @@ class Line(object):
         self.command = command
         self.origtext = origtext
         self.dependencies = []
+        self.executedby = []
+
+    def copy_exec_info(self, line):
+        assert line.idx == self.idx
+        assert line.command == self.command
+        assert line.origtext == self.origtext
+        self.status = line.status
+        self.retcode = line.retcode
+        self.output = line.output
+        self.executedby = line.executedby
 
     def __repr__(self):
         return '<Line {} {} {} {} {} {} {} {} {}>'.format(
             self.idx, self.status, self.tag, self.dependencies, self.always,
             self.command, self.retcode, self.output, self.dbginfo)
 
-    def human(self):
-        hl_text = highlight(self.origtext, BashLexer(), TerminalFormatter())
-        symbol = as_symbol(self.status)
-        idx = self.idx
-        if self.command is None:
-            idx = "   "
-            symbol = " "
-        return '{} {:>3} {}'.format(symbol, idx, hl_text)
-
-def pretty_print(state):
+def pretty_print(state, workeruid=None):
     print("")
     human_lines = "\n".join([line.origtext for line in state])
     hl_human_lines = highlight(human_lines, BashLexer(), TerminalFormatter())
     for hl_linetext, line in zip(hl_human_lines.split("\n"), state):
         symbol = as_symbol(line.status)
+        if workeruid is not None:
+            if workeruid not in line.executedby and line.status != St.UNTREATED:
+                symbol = "(" + symbol + ")"
+            else:
+                symbol = " " + symbol + " "
         idx = line.idx
         if line.command is None:
             idx = "   "
             symbol = "  "
+            if workeruid is not None:
+                symbol = " " + symbol + " "
         print('{} {:>3} {}'.format(symbol, idx, hl_linetext))
 
 def all_succeeded(state):
     for line in state:
         if line.status != St.SUCCEEDED:
+            return False
+    return True
+
+def all_treated(state):
+    for line in state:
+        if line.status == St.UNTREATED:
             return False
     return True
 
@@ -263,6 +293,31 @@ def execute_line(line, ishell):
 #             return 1, ""
     return ret, out
 
+def execute_line_unless(line, ishell, interactive, skip):
+    execute_this_line = True
+    if skip:
+        execute_this_line = False
+    if execute_this_line and interactive:
+        print("")
+        print("Going to execute line {}. Execute or skip? [e/s]".format(line.idx))
+        choice = input(">> ")
+        if choice.lower() in ["e", "execute"]:
+            execute_this_line = True
+        else:
+            execute_this_line = False
+    if execute_this_line:
+        line.starttime = datetime.now()
+        retcode, output = execute_line(line, ishell)
+        line.retcode = retcode
+        line.output = output
+        line.endtime = datetime.now()
+        if retcode == 0:
+            line.status = St.SUCCEEDED
+        else:
+            line.status = St.FAILED
+    else:
+        line.status = St.SKIPPED
+
 def initialize_state(path):
     original_script = open(path, 'r').read()
     original_lines, corrected_lines = split_lines(original_script)
@@ -279,10 +334,40 @@ def make_dir_if_not_exists(dir_):
         if not os.path.isdir(dir_):
             raise
 
-def write_state(path, state, silent=False):
-    for line in state:
-        if line.status == St.EXECUTING:
-            line.status = St.UNTREATED
+def wid_to_str(wid):
+    return "___".join([str(elem) for elem in wid])
+
+def lock(path, workeruid, timeout_s=10.):
+    lockfile = path + ".executor.lock"
+    retry_s = 0.5
+    waited_s = 0.
+    while timeout_s is None or waited_s < timeout_s:
+        if os.path.exists(lockfile):
+            time.sleep(retry_s)
+            continue
+        with open(lockfile, 'w') as f:
+            f.write(wid_to_str(workeruid))
+            return True
+    print("Could not acquire lockfile {} after {}s".format(lockfile, waited_s))
+
+def unlock(path, workeruid, strict=True):
+    lockfile = path + ".executor.lock"
+    if os.path.exists(lockfile):
+        with open(lockfile, 'r') as f:
+            file_workeruid = f.read()
+            if file_workeruid == wid_to_str(workeruid):
+                os.remove(lockfile)
+            else:
+                raise ValueError("unlocking lockfile {} which is locked by another worker {}".format(
+                    lockfile, file_workeruid))
+    else:
+        if strict:
+            raise ValueError("unlocking lockfile {} which does not exist".format(lockfile))
+        else:
+            pass
+
+
+def write_state(path, state, workeruid, silent=False):
     wpath = path + ".executor"
     make_dir_if_not_exists(os.path.dirname(wpath))
     if os.path.exists(wpath):
@@ -296,7 +381,7 @@ def write_state(path, state, silent=False):
     # write log
     log = "\n".join([line.output for line in state if line.output is not None])
     log = log + "\n" + datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    lpath = path + ".executor.log"
+    lpath = path + ".executor.{}.log".format(workeruid[0])
     make_dir_if_not_exists(os.path.dirname(lpath))
     if os.path.exists(lpath):
         if not silent:
@@ -306,10 +391,13 @@ def write_state(path, state, silent=False):
             print("Writing {}".format(lpath))
     open(lpath, 'w').write(log)
 
-def load_previous_if_exists(path, force_rerun=False, force_continue=False):
+def load_previous_if_exists(path, force_rerun=False, force_continue=False, parallel=False,
+                            reloading_in_mainloop=False):
     new_state = initialize_state(path)
     prev_path = path + ".executor"
     if not os.path.exists(prev_path):
+        if reloading_in_mainloop:
+            raise ValueError("Previous state not found, but is required: {}".format(prev_path))
         if force_continue:
             print("Warning: no previous execution file found, but --continue flag was specified.")
             print("Proceeding anyways in 3 seconds. (Ctrl-c to cancel)")
@@ -319,6 +407,18 @@ def load_previous_if_exists(path, force_rerun=False, force_continue=False):
         return new_state
     prev_state = pickle.load(open(prev_path, 'rb'))
     if states_have_same_original_files(new_state, prev_state):
+        # in parallel execution we are always continuing other workers work
+        if parallel or reloading_in_mainloop:
+            return prev_state
+        else:
+            for line in prev_state:
+                if line.status == St.EXECUTING:
+                    pretty_print(prev_state)
+                    raise ValueError(
+                        "Line {} is logged as executing. \
+                         Either a parallel process is working on this script or \
+                         a previous one crashed during execution. \
+                         Either run with --parallel flag or delete previous execution.".format(line.idx))
         print("Previous execution found for script (script is unchanged).")
         if all_succeeded(prev_state):
             print("Previous execution was completed successfully.")
@@ -359,6 +459,8 @@ def load_previous_if_exists(path, force_rerun=False, force_continue=False):
             print("Unknown choice {}".format(choice))
         return None
     else:
+        if parallel: # in parallel execution we are always continuing other workers work
+            raise ValueError("Script has changed, for --parallel this leads to undefined behavior. Aborting")
         print("Previous state found for script, but script has changed.")
         if force_rerun:
             print("Forcing rerun.")
@@ -377,15 +479,16 @@ def states_have_same_original_files(state1, state2):
             return False
     return True
 
-def main(path="", args="", force_rerun=False, cont=False, interactive=False, debug=False, version=False):
+def main(path="", args="", force_rerun=False, cont=False, parallel=False, interactive=False,
+         debug=False, version=False):
+    if version:
+        print_version()
+        return
     if path == "":
         print_version()
         print("")
         print("No path provided. Nothing to EXECUTE. Done.")
         print("(executor --help for usage.)")
-        return
-    if version:
-        print_version()
         return
     if DEBUG:
         from IPython import get_ipython
@@ -398,70 +501,121 @@ def main(path="", args="", force_rerun=False, cont=False, interactive=False, deb
             else:
                 ipython.magic("pdb 1")
         enable_auto_debug()
+    workeruid = (os.getpid(), time.time())
+    if parallel:
+        if force_rerun:
+            # parallel assumes that we get failures / successes / skips info from other workers
+            # force-rerun ignores that information by definition -> contradiction
+            raise ValueError("Parallel execution is not supported with --force-rerun.")
     path = os.path.abspath(path)
     print("Going to EXECUTE script {} {}".format(path, args))
-    state = load_previous_if_exists(path, force_rerun=force_rerun, force_continue=cont)
-    if state is None:
-        return
-    if debug:
-        for line in state:
-            print(line)
-        input("Press enter to continue")
-    # execute(state)
+    # spawn ishell
     ishell = pexpect.spawn("/bin/bash")
-    ishell.logfile = open('/tmp/executor_running_log.txt', 'wb')
+    ishell.logfile = open('/tmp/executor_running_log.{}.txt'.format(workeruid[0]), 'wb')
     ishell.expect(r'\$')
     if args != "":
         ishell.sendline("set {}".format(args))
         ishell.expect(r'\$')
     start_t = datetime.now()
-    for line in state:
-        if line.always == "no":
-            # skip lines if required (dependencies, or already done)
-            if line.status != St.UNTREATED:
-                continue
+    # atomic operation (transition from state to state)
+    #   0. either execution of a line finishes, or we start from scratch
+    #   1. lock - load state
+    #   2. if we just finished execution, modify state: line executing -> failed / succeeded
+    #   2. find next line that can be executed
+    #      (always -> run,
+    #       failed / succeeded -> leave as is
+    #       executing / skipped -> leave as is,
+    #       untreated: deps skipped / failed -> skip, deps untreated / executing -> leave as is,
+    #                  deps suceeded -> run)
+    #   3a. new state: line now executing / skipped
+    #   3b. nothing to do: leave state as is
+    #   4. write state - unlock
+    lock(path, workeruid)
+    try:
+        state = load_previous_if_exists(path, force_rerun=force_rerun, force_continue=cont, parallel=parallel)
+        if state is None:
+            return
+        if debug:
+            for line in state:
+                print(line)
+            input("Press enter to continue")
+        step = -1
+        while True:
+            step = step + 1
+            if step >= len(state):
+                # reached the end. If not parallel, we are done.
+                if not parallel:
+                    break
+                # But if parallel maybe we are waiting for another process to free some work branches
+                else:
+                    if all_treated(state):
+                        break
+                    else:
+                        print("Waiting for other processes to finish.")
+                        unlock(path, workeruid, strict=False)
+                        time.sleep(1)
+                        step = 0
+                        lock(path, workeruid)
+                        state = load_previous_if_exists(path, parallel=parallel, reloading_in_mainloop=True)
+                        continue
+            line = state[step]
             skip = False
-            for dep in line.dependencies:
-                if find_line_with_idx(dep, state).status != St.SUCCEEDED:
-                    skip = True
+            if line.always == "no": # "always" ignores dependencies
+                # skip lines if required (dependencies, or already done)
+                if line.status in [St.SKIPPED, St.EXECUTING, St.SUCCEEDED, St.FAILED]:
+                    continue
+                elif line.status in [St.UNTREATED]:
+                    leave_untreated = False
+                    for dep in line.dependencies:
+                        dep_status = find_line_with_idx(dep, state).status
+                        if dep_status in [St.EXECUTING]:
+                            leave_untreated = True # a sequential branch we can't do much about
+                        elif dep_status in [St.UNTREATED]:
+                            leave_untreated = True # we could also wait for the other process to free
+                        elif dep_status in [St.SKIPPED, St.FAILED]:
+                            skip = True
+                        elif dep_status in [St.SUCCEEDED]:
+                            pass
+                        else:
+                            raise ValueError("Unknown status {}".format(dep_status))
+                    if leave_untreated:
+                        continue
+                else:
+                    raise ValueError("Unknown status {}".format(line.status))
             if skip:
                 line.status = St.SKIPPED
-                continue
-        write_state(path, state, silent=True)
-        line.status = St.EXECUTING
+            else:
+                line.status = St.EXECUTING
+                line.executedby.append(workeruid)
+            write_state(path, state, workeruid, silent=True)
+            unlock(path, workeruid)
+            # update GUI (also if skipping)
+            print("EXECUTING ({})".format(datetime.now() - start_t))
+            print("---------")
+            pretty_print(state, workeruid=workeruid)
+            # actually execute the line
+            execute_line_unless(line, ishell, interactive, skip)
+            if line.status != St.SUCCEEDED and line.always == "always":
+                print("Always-required command failed. Aborting.")
+                break
+            # other processes may have changed state in the meantime
+            # load state again - change this line's status - then write state
+            lock(path, workeruid)
+            state = load_previous_if_exists(path, parallel=parallel, reloading_in_mainloop=True)
+            to_mod_line = find_line_with_idx(line.idx, state)
+            to_mod_line.copy_exec_info(line) # maybe todo: check that line previous state was exec/skip
+            write_state(path, state, workeruid, silent=True)
         print("EXECUTING ({})".format(datetime.now() - start_t))
         print("---------")
-        pretty_print(state)
-        execute_this_line = True
-        if interactive:
-            print("")
-            print("Going to execute line {}. Execute or skip? [e/s]".format(line.idx))
-            choice = input(">> ")
-            if choice.lower() in ["e", "execute"]:
-                execute_this_line = True
-            else:
-                execute_this_line = False
-        if execute_this_line:
-            retcode, output = execute_line(line, ishell)
-            line.retcode = retcode
-            line.output = output
-            if retcode == 0:
-                line.status = St.SUCCEEDED
-            else:
-                line.status = St.FAILED
-        else:
-            line.status = St.SKIPPED
-        if line.status != St.SUCCEEDED and line.always == "always":
-            print("Always-required command failed. Aborting.")
-            break
-    print("EXECUTING ({})".format(datetime.now() - start_t))
-    print("---------")
-    pretty_print(state)
-    print("")
-    print("DONE.")
-    print("")
-    write_state(path, state)
-    if DEBUG:
-        globals().update(locals())
-    ishell.logfile.close()
-    ishell.close()
+        pretty_print(state, workeruid=workeruid)
+        print("")
+        print("DONE.")
+        print("")
+        if DEBUG:
+            globals().update(locals())
+        write_state(path, state, workeruid)
+    finally:
+        # if I was executing a line, set it to untreated (or failed?), then write state
+        unlock(path, workeruid, strict=False)
+        ishell.logfile.close()
+        ishell.close()
